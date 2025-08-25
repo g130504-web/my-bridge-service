@@ -4,21 +4,37 @@ from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, JoinEvent
 import telegram
+import logging
 
 app = Flask(__name__)
+logging.basicConfig(level=logging.INFO)
 
-# --- Read credentials from Environment Variables ---
+# --- Configuration ---
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET')
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
-# This variable will hold the destination for TG messages
-# It will be set when the bot is first added to a LINE group
-line_destination_id = None
+# --- File path for persistence on Render Disk ---
+DESTINATION_FILE = '/var/data/line_destination.txt'
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 telegram_bot = telegram.Bot(token=TELEGRAM_BOT_TOKEN)
+
+def save_destination(dest_id):
+    try:
+        os.makedirs(os.path.dirname(DESTINATION_FILE), exist_ok=True)
+        with open(DESTINATION_FILE, 'w') as f:
+            f.write(dest_id)
+        app.logger.info(f"Successfully saved destination ID: {dest_id}")
+    except Exception as e:
+        app.logger.error(f"Failed to save destination ID: {e}")
+
+def load_destination():
+    if os.path.exists(DESTINATION_FILE):
+        with open(DESTINATION_FILE, 'r') as f:
+            return f.read().strip()
+    return None
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -32,23 +48,24 @@ def callback():
 
 @handler.add(JoinEvent)
 def handle_join(event):
-    global line_destination_id
-    # When bot joins a group, set that group as the destination
+    dest_id = None
     if hasattr(event.source, 'group_id'):
-        line_destination_id = event.source.group_id
+        dest_id = event.source.group_id
     elif hasattr(event.source, 'user_id'):
-        line_destination_id = event.source.user_id
-    app.logger.info(f"LINE destination set to: {line_destination_id}")
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextMessage(text='[Bridge Bot] 已將此處設為Telegram訊息目的地。')
-    )
+        dest_id = event.source.user_id
+
+    if dest_id:
+        save_destination(dest_id)
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextMessage(text='[Bridge Bot] 已將此處設為Telegram訊息目的地。')
+        )
 
 @app.route('/telegram', methods=['POST'])
 def telegram_webhook():
-    global line_destination_id
+    line_destination_id = load_destination()
     if not line_destination_id:
-        app.logger.warning("Telegram message received, but no LINE destination is set.")
+        app.logger.warning("Telegram message received, but no LINE destination is set. Please re-invite the LINE bot to a group.")
         return 'OK'
 
     update = request.get_json()
@@ -58,7 +75,6 @@ def telegram_webhook():
 
         message_to_line = f"[Telegram - {sender_name}]:\n{chat_text}"
         line_bot_api.push_message(line_destination_id, TextMessage(text=message_to_line))
-
     return 'OK'
 
 if __name__ == "__main__":
